@@ -1,8 +1,5 @@
 use crate::Effect;
-use std::{
-    any::Any,
-    sync::{Arc, Mutex},
-};
+use std::any::Any;
 
 pub struct AnyEffect<'a> {
     slot: &'a mut dyn Any,
@@ -14,11 +11,12 @@ pub struct EffectSlot<E: Effect> {
 
 enum EffectSlotState<E: Effect> {
     Unused(E),
-    Handled(Arc<Mutex<Option<E::Return>>>),
+    Handling,
+    Handled(E::Return),
 }
 
-pub struct EffectReturnSlot<E: Effect> {
-    slot: Arc<Mutex<Option<E::Return>>>,
+pub struct EffectReturnSlot<'a, E: Effect> {
+    state: &'a mut EffectSlotState<E>,
 }
 
 impl<'a> AnyEffect<'a> {
@@ -28,7 +26,7 @@ impl<'a> AnyEffect<'a> {
         }
     }
 
-    pub fn try_cast<E: Effect>(self) -> Result<(EffectReturnSlot<E>, E), Self> {
+    pub fn try_cast<E: Effect>(self) -> Result<(EffectReturnSlot<'a, E>, E), Self> {
         if !self.slot.is::<EffectSlot<E>>() {
             return Err(self);
         }
@@ -36,13 +34,12 @@ impl<'a> AnyEffect<'a> {
         let slot: &mut EffectSlot<E> = self.slot.downcast_mut().unwrap();
         let state = &mut slot.state;
 
-        let arc = Arc::new(Mutex::new(None));
-        match std::mem::replace(state, EffectSlotState::Handled(Arc::clone(&arc))) {
-            EffectSlotState::Handled(_) => {
+        match std::mem::replace(state, EffectSlotState::Handling) {
+            EffectSlotState::Handling | EffectSlotState::Handled(_) => {
                 panic!("tried to cast already handled effect.")
             }
             EffectSlotState::Unused(v) => {
-                let return_slot = EffectReturnSlot { slot: arc };
+                let return_slot = EffectReturnSlot { state };
                 Ok((return_slot, v))
             }
         }
@@ -58,26 +55,14 @@ impl<E: Effect> EffectSlot<E> {
 
     pub fn take(self) -> Result<E::Return, Self> {
         match self.state {
-            state @ EffectSlotState::Unused(_) => Err(Self { state }),
-            EffectSlotState::Handled(arc) => {
-                let mut lock = arc.lock().unwrap();
-                match lock.take() {
-                    Some(v) => Ok(v),
-                    None => {
-                        drop(lock);
-                        Err(Self {
-                            state: EffectSlotState::Handled(arc),
-                        })
-                    }
-                }
-            }
+            state @ (EffectSlotState::Unused(_) | EffectSlotState::Handling) => Err(Self { state }),
+            EffectSlotState::Handled(v) => Ok(v),
         }
     }
 }
 
-impl<E: Effect> EffectReturnSlot<E> {
+impl<'a, E: Effect> EffectReturnSlot<'a, E> {
     pub fn set(self, result: E::Return) {
-        let mut lock = self.slot.lock().unwrap();
-        *lock = Some(result);
+        *self.state = EffectSlotState::Handled(result);
     }
 }
